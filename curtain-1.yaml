@@ -1,0 +1,9 @@
+substitutions:
+  name: curtain-1
+  sweep_speed: "600"
+  default_end_position: "30000"
+  api_key: !secret curtain-1-api-encryption-key
+  ota_password: !secret curtain-1-ota-password
+
+packages:
+  base: github://ansedd95/esphome.curtain/curtain_base.yaml@main
