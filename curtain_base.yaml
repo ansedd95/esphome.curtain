@@ -1,0 +1,266 @@
+substitutions:
+  name: curtain-1
+  sweep_speed: "600"
+  default_end_position: "30000"
+
+esphome:
+  name: ${name}
+  friendly_name: ${name}
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret curtain-1-api-encryption-key
+
+ota:
+  - platform: esphome
+    password: !secret curtain-1-ota-password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${name} Fallback Hotspot"
+    password: "123123123123"
+
+captive_portal:
+
+# ── Stepper ───────────────────────────────────────────────────────────────────
+stepper:
+  - platform: uln2003
+    id: my_stepper
+    pin_a: GPIO0
+    pin_b: GPIO1
+    pin_c: GPIO2
+    pin_d: GPIO3
+    max_speed: ${sweep_speed} steps/s
+    sleep_when_done: true
+    step_mode: HALF_STEP
+
+# ── Binary sensors ────────────────────────────────────────────────────────────
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLDOWN
+      inverted: false
+    id: limit_switch
+    name: "Curtain Home Switch"
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      then:
+        - logger.log: "Limit switch hit – zeroing position"
+        - lambda: |
+            id(my_stepper).report_position(0);
+            id(my_stepper).set_target(0);
+            id(g_is_homed) = true;
+            id(my_cover).position = 0.0f;
+            id(my_cover).publish_state();
+
+  - platform: template
+    name: "Curtain Homed"
+    lambda: return id(g_is_homed);
+
+# ── Globals ───────────────────────────────────────────────────────────────────
+globals:
+  - id: g_end_position
+    type: int
+    restore_value: true
+    initial_value: "${default_end_position}"
+
+  - id: g_side_reversed
+    type: bool
+    restore_value: true
+    initial_value: "false"
+
+  - id: g_is_homed
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+# ── Interval: publish cover position while moving ─────────────────────────────
+interval:
+  - interval: 3s
+    then:
+      - lambda: |-
+          static bool was_moving = false;
+          bool is_moving = id(my_stepper).current_position != id(my_stepper).target_position;
+          if (is_moving || was_moving) {
+            int pos = id(my_stepper).current_position;
+            int end = id(g_end_position);
+            if (end == 0) return;
+            float cover_pct;
+            if (id(g_side_reversed))
+              cover_pct = (float)(-pos) / (float)end;
+            else
+              cover_pct = (float)pos / (float)end;
+            cover_pct = clamp(cover_pct, 0.0f, 1.0f);
+            id(my_cover).position = cover_pct;
+            id(my_cover).publish_state();
+          }
+          was_moving = is_moving;
+
+# ── HA: Motor side select ─────────────────────────────────────────────────────
+select:
+  - platform: template
+    name: "Motor Side"
+    id: sel_side
+    options:
+      - "Left"
+      - "Right"
+    initial_option: "Left"
+    restore_value: true
+    optimistic: true
+    on_value:
+      then:
+        - lambda: |
+            id(g_side_reversed) = (x == "Right");
+
+# ── HA: Travel length ─────────────────────────────────────────────────────────
+number:
+  - platform: template
+    name: "Curtain Travel (steps)"
+    id: num_end_position
+    min_value: 1000
+    max_value: 300000
+    step: 100
+    initial_value: ${default_end_position}
+    restore_value: true
+    optimistic: true
+    mode: box
+    on_value:
+      then:
+        - lambda: |
+            id(g_end_position) = (int)x;
+
+# ── HA: Cover entity ──────────────────────────────────────────────────────────
+cover:
+  - platform: template
+    name: "Curtain"
+    id: my_cover
+    device_class: curtain
+    has_position: true
+    optimistic: false
+    open_action:
+      - script.execute:
+          id: move_to_pct
+          pct: 100
+    close_action:
+      - script.execute:
+          id: move_to_pct
+          pct: 0
+    stop_action:
+      - script.stop: move_to_pct
+      - lambda: |
+          id(my_stepper).set_target(id(my_stepper).current_position);
+    position_action:
+      - script.execute:
+          id: move_to_pct
+          pct: !lambda return (int)(pos * 100.0f);
+
+# ── Scripts ───────────────────────────────────────────────────────────────────
+script:
+  - id: move_to_pct
+    mode: restart
+    parameters:
+      pct: int
+    then:
+      - lambda: |
+          int end = id(g_end_position);
+          int dir = id(g_side_reversed) ? -1 : 1;
+          int target = (int)(((float)pct / 100.0f) * (float)end) * dir;
+          id(my_stepper).set_target(target);
+      - wait_until:
+          condition:
+            lambda: return id(my_stepper).current_position == id(my_stepper).target_position;
+          timeout: 120s
+      - lambda: |
+          int pos = id(my_stepper).current_position;
+          int end = id(g_end_position);
+          float cover_pct = id(g_side_reversed) ? (float)(-pos) / (float)end : (float)pos / (float)end;
+          id(my_cover).position = clamp(cover_pct, 0.0f, 1.0f);
+          id(my_cover).publish_state();
+      - logger.log: "Move complete"
+
+  - id: homing_sequence
+    mode: restart
+    then:
+      - logger.log: "Starting homing sequence – backing off switch"
+      - lambda: |
+          id(g_is_homed) = false;
+          id(my_stepper).set_max_speed(${sweep_speed});
+          int dir = id(g_side_reversed) ? -1 : 1;
+          id(my_stepper).set_target(dir * 2000);
+      - wait_until:
+          condition:
+            lambda: return !id(limit_switch).state;
+          timeout: 10s
+      - logger.log: "Switch released – seeking home"
+      - lambda: |
+          int dir = id(g_side_reversed) ? 1 : -1;
+          id(my_stepper).set_target(dir * 200000);
+      - wait_until:
+          condition:
+            lambda: return id(limit_switch).state;
+          timeout: 60s
+      - logger.log: "Homing complete"
+
+  - id: max_seek_sequence
+    mode: restart
+    then:
+      - logger.log: "Max seek – moving toward max position"
+      - lambda: |
+          id(my_stepper).set_max_speed(${sweep_speed});
+          int dir = id(g_side_reversed) ? -1 : 1;
+          id(my_stepper).set_target(dir * 300000);
+      - wait_until:
+          condition:
+            lambda: return id(my_stepper).current_position == id(my_stepper).target_position;
+          timeout: 300s
+      - logger.log: "Max seek reached hard limit"
+
+# ── Buttons ───────────────────────────────────────────────────────────────────
+button:
+  - platform: template
+    name: "Jog Close 1000 steps"
+    on_press:
+      - lambda: |
+          int dir = id(g_side_reversed) ? -1 : 1;
+          id(my_stepper).set_target(id(my_stepper).current_position + (1000 * dir));
+
+  - platform: template
+    name: "Jog Open 1000 steps"
+    on_press:
+      - lambda: |
+          int dir = id(g_side_reversed) ? -1 : 1;
+          id(my_stepper).set_target(id(my_stepper).current_position - (1000 * dir));
+
+  - platform: template
+    name: "Run Homing Sequence"
+    on_press:
+      - script.execute: homing_sequence
+
+  - platform: template
+    name: "Set Max Position – Start"
+    on_press:
+      - script.execute: max_seek_sequence
+
+  - platform: template
+    name: "Set Max Position – Mark Here"
+    on_press:
+      - script.stop: max_seek_sequence
+      - lambda: |
+          id(my_stepper).set_target(id(my_stepper).current_position);
+          int pos = abs(id(my_stepper).current_position);
+          id(g_end_position) = pos;
+          auto call = id(num_end_position).make_call();
+          call.set_value((float)pos);
+          call.perform();
+          ESP_LOGI("curtain", "Max position set to %d steps", pos);
