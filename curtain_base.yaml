@@ -36,7 +36,7 @@ stepper:
     pin_d: GPIO3
     max_speed: ${sweep_speed} steps/s
     sleep_when_done: true
-    step_mode: HALF_STEP
+    step_mode: FULL_STEP
 
 # ── Binary sensors ────────────────────────────────────────────────────────────
 binary_sensor:
