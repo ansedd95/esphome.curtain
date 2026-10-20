@@ -107,7 +107,6 @@ The following entries are required in your `secrets.yaml`:
 
 ```yaml
 curtain-1-api-encryption-key: "your-key-here"
-curtain-1-ota-password: "your-password-here"
 wifi_ssid: "your-ssid"
 wifi_password: "your-wifi-password"
 ```

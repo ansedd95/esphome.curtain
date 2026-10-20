@@ -15,7 +15,10 @@ api:
 
 ota:
   - platform: esphome
-    password: ${ota_password}
+    # Uploads are encrypted with the api encryption key (inherited).
+    # Devices must run firmware built with ESPHome 2026.9+ (with the old
+    # password config) before switching to this version.
+    encryption: {}
 
 wifi:
   ssid: !secret wifi_ssid
